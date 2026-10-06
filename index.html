@@ -73,7 +73,7 @@
   <button id="drift" aria-pressed="true"><i>D</i>Seabed drift</button>
 </div>
 
-<div class="hud br">Drag · rotate<br>Scroll · zoom<br>Space + move · pan<br>0 · recenter<br>D · drift</div>
+<div class="hud br">Drag · rotate<br>Scroll · zoom<br>Space + move · pan<br>Two fingers · pan / zoom<br>0 · recenter<br>D · drift</div>
 
 <script>
 (() => {
@@ -1058,7 +1058,7 @@ function frame(now) {
 
 /* ───────────── Interaction ───────────── */
 const pointers = new Map();
-let pinch = 0;
+let pinch = 0, pinchX = 0, pinchY = 0;   // distance and midpoint of the last two-finger gesture
 const autoBtn = $('auto');
 const setAuto = v => { auto = v; autoBtn.setAttribute('aria-pressed', v); };
 setAuto(auto);
@@ -1104,10 +1104,11 @@ canvas.addEventListener('pointermove', e => {
   if (pointers.size === 1) {
     yaw += dx * .006;
     pitch = Math.min(1.45, Math.max(.08, pitch + dy * .005));
-  } else if (pointers.size === 2) {
+  } else if (pointers.size === 2) {   // two fingers: spread to zoom, move together to pan (the touch equivalent of Space + move)
     const [a, b] = [...pointers.values()], d = Math.hypot(a.x - b.x, a.y - b.y);
-    if (pinch) userZoom = Math.min(4, Math.max(.4, userZoom * d / pinch));
-    pinch = d;
+    const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+    if (pinch) { userZoom = Math.min(4, Math.max(.4, userZoom * d / pinch)); panBy(mx - pinchX, my - pinchY); }
+    pinch = d; pinchX = mx; pinchY = my;
   }
 });
 const release = e => { pointers.delete(e.pointerId); pinch = 0; lastInput = performance.now(); if (!pointers.size) canvas.classList.remove('drag'); };
