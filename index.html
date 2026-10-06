@@ -101,7 +101,7 @@ const CFG = {
   stationStep: 320, // markers stand four cells of the 80 px floor grid apart …
   stationOffset: 40,// … starting half a cell in from the edge (at the start position)
   pingTime: 3,      // seconds a marker's sphere takes to grow
-  pingRadius: 250,  // how far it grows
+  pingRadius: 384,  // how far it grows: the full depth of the sea, so it reaches the surface (capped per marker at the surface)
   pingOpacity: .05, // fill of the sphere
   pingOutline: .15, // outline of the sphere
   stationTop: 38,   // how far above the sea surface a marker's line ends
@@ -778,8 +778,7 @@ function visibleStations(dt) {
       const code = '#0' + (100 + Math.floor(hash(nx * 13 + 342, nz * 7 - 11) * 900));   // … and its own number, like #0344
       // the sphere finds the contact as soon as it has grown out to it (the contact counted as half its length wide),
       const m = { x, z, h, alpha, phase, code, key: 0, ping: false, color: COL.accent };
-      // measured along the seabed, so a boat on the surface or a diver near it can be found as well
-      const reach = Math.hypot(x - sub.x, z - sub.z) - sub.def.length / 2;
+      const reach = Math.hypot(x - sub.x, ySeaBot + h - sub.y, z - sub.z) - sub.def.length / 2;
       // … and from then on the marker stays alerted until the boat is out of range: further away than the sphere ever gets
       const range = Math.min(CFG.pingRadius, CFG.seaDepth - h);
       if (sub.alpha <= .3 || reach > range) podAlert.delete(code);
@@ -863,7 +862,7 @@ function drawStation(m, t, base) {
 
 /* ───────────── Contacts ─────────────
    One contact at a time moves against the way the seabed slides past: a submarine, a scuba diver or a boat on the
-   waves, in turn. Until a marker has identified it, it is only a faint dot; identified, its shape appears. Shapes are
+   waves, in turn. Until a marker has identified it, it is invisible; identified, its shape appears. Shapes are
    drawn as crossed outlines (side view and top view), so they read as bodies from any angle. */
 const SUB_HULL = [-9, 0, -7.5, 1.5, -4, 2.1, 4, 2.1, 7.5, 1.4, 9, 0, 7.5, -1.4, 4, -2.1, -4, -2.1, -7.5, -1.5];   // along, across — for a length of 18
 const sub = { kind: 0, def: CFG.contacts[0], wx: -90, wz: CFG.contactLane, x: 0, y: 0, z: 0, hx: 1, hz: 0, alpha: 1, seen: false, flag: 0, top: null };
@@ -891,15 +890,11 @@ function updateSub(t, dt) {           // where the contact is this frame (the ma
 
 function drawSub() {
   const { x, y, z, hx, hz, def } = sub;
-  // Until a marker has identified it, the contact is only a faint dot. Once identified (and for as long as a
-  // marker keeps it in range) its shape fades in, with the red mark above it.
+  // Until a marker has identified it, the contact is invisible. Once identified (and for as long as a marker
+  // keeps it in range) its shape fades in, with the red mark above it.
   sub.flag = lerp(sub.flag, sub.seen ? 1 : 0, Math.min(1, dtNow * 10));
   const alpha = sub.alpha * sub.flag;
-  if (sub.flag < .99) {
-    P(x, y, z);
-    ctx.fillStyle = rgba(COL.white, .35 * sub.alpha * (1 - sub.flag));
-    ctx.beginPath(); ctx.arc(PX, PY, 1.2 * PS, 0, 6.2832); ctx.fill();
-  }
+  if (alpha < .01) { sub.top = null; return; }
 
   // screen directions of "one px forward / up / sideways" at the contact, then every part in those terms;
   // shapes are designed for a length of 18 and scaled to the contact's length
