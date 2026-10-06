@@ -1,0 +1,1135 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sea Column — layer model</title>
+<style>
+  :root {
+    --bg: #030304;
+    --ink: #dfe3e6;
+    --white: #ffffff;
+    --accent: #3679ff;
+    --line: rgba(255, 255, 255, .24);
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; height: 100%; overflow: hidden;
+    background: radial-gradient(ellipse 90% 80% at 55% 50%, #131517 0%, #08090a 55%, var(--bg) 100%);
+    color: var(--ink);
+    font: 11px/1.5 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    letter-spacing: .14em; text-transform: uppercase;
+  }
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; cursor: grab; touch-action: none; }
+  canvas.drag { cursor: grabbing; }
+  canvas.pan { cursor: move; }
+
+  .hud { position: fixed; z-index: 1; user-select: none; -webkit-user-select: none; }
+  .tl { top: 20px; left: 20px; }
+  .bl { bottom: 20px; left: 20px; display: flex; flex-direction: column; gap: 5px; }
+  .br { bottom: 20px; right: 20px; color: rgba(255, 255, 255, .5); text-align: right; pointer-events: none; }
+
+  h1 { margin: 0 0 2px; font-size: 13px; font-weight: 500; color: var(--white); letter-spacing: .22em; }
+  h1 span { color: var(--accent); }
+  .sub { color: rgba(255, 255, 255, .5); }
+  .read { display: grid; grid-template-columns: repeat(4, auto); gap: 0 14px; margin: 10px 0 0; width: max-content; }
+  .read dt { color: rgba(255, 255, 255, .45); font-size: 9px; }
+  .read dd { margin: 0; color: var(--white); grid-row: 2; font-variant-numeric: tabular-nums; }
+
+  button {
+    font: inherit; letter-spacing: inherit; text-transform: inherit; color: var(--white);
+    display: flex; align-items: center; gap: 10px; width: 196px; padding: 7px 10px;
+    background: rgba(255, 255, 255, .04); border: 1px solid var(--line); cursor: pointer;
+    clip-path: polygon(0 0, calc(100% - 8px) 0, 100% 8px, 100% 100%, 8px 100%, 0 calc(100% - 8px));
+    transition: opacity .15s, background .15s;
+  }
+  button:hover { background: rgba(255, 255, 255, .1); }
+  button:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
+  button i { font-style: normal; color: var(--accent); }
+  button::after { content: ""; margin-left: auto; width: 7px; height: 7px; background: var(--white); box-shadow: 0 0 8px rgba(255, 255, 255, .8); }
+  button[aria-pressed="false"] { opacity: .42; }
+  button[aria-pressed="false"]::after { background: none; box-shadow: none; outline: 1px solid var(--line); }
+
+
+  @media (max-width: 640px) { .br { display: none; } .read { display: none; } h1 { margin-bottom: 10px; } }
+</style>
+</head>
+<body>
+<canvas id="scene" aria-label="3D layer model of sea and seabed"></canvas>
+
+<div class="hud tl">
+  <h1>Sea column <span>//</span> layer model</h1>
+  <div class="sub">480 × 480 px · <span id="r-pos">X +0 · Z +0</span></div>
+  <dl class="read">
+    <dt>Yaw</dt><dd id="r-yaw">0°</dd>
+    <dt>Pitch</dt><dd id="r-pitch">0°</dd>
+    <dt>Zoom</dt><dd id="r-zoom">1.00</dd>
+    <dt>FPS</dt><dd id="r-fps">60</dd>
+  </dl>
+</div>
+
+<div class="hud bl">
+  <button id="auto" aria-pressed="true"><i>R</i>Auto-rotate</button>
+  <button id="drift" aria-pressed="true"><i>D</i>Seabed drift</button>
+</div>
+
+<div class="hud br">Drag · rotate<br>Scroll · zoom<br>Space + move · pan<br>0 · recenter<br>D · drift</div>
+
+<script>
+(() => {
+'use strict';
+
+/* ───────────── Settings (all sizes in px) ───────────── */
+const CFG = {
+  size: 480,        // width × length of the field
+  seaDepth: 384,    // depth of the sea (layer 2)
+  waveLines: 31,    // number of wave lines (layer 1)
+  waveOpacity: .6,  // overall strength of the (blue) wave lines
+  waveSolid: .9,    // how completely a crest hides the wave lines behind it (1 = fully)
+  seaTint: .14,     // strength of the blue on the side walls of the sea, at the seabed (fades out upwards)
+  waveAmp: 7,       // wave height
+  reliefMax: 96,    // highest rock above the seabed (< seaDepth)
+  floorMin: 12,     // outside an abyss the seabed never drops below this height …
+  floorVar: 18,     // … and undulates up to this much above it, so there is relief everywhere
+  contourStep: 2.5, // height difference between the contour lines of the seabed, floor and rock alike …
+  contourOpacity: .16,   // … and how faint they are drawn
+  abyssStep: 10,    // height difference between the rings of an abyss …
+  abyssOpacity: .45,// … and the strength of its rim ring (every ring below it is half as bright)
+  abyssDepth: [24, 32],   // small abysses drop this far below the seabed frame
+  gridPlus: 5,      // arm length of the pluses on the floor grid
+  gridGap: 6,       // gap between a plus and the line next to it
+  stationStep: 320, // markers stand four cells of the 80 px floor grid apart …
+  stationOffset: 40,// … starting half a cell in from the edge (at the start position)
+  pingTime: 3,      // seconds a marker's sphere takes to grow
+  pingRadius: 250,  // how far it grows
+  pingOpacity: .05, // fill of the sphere
+  pingOutline: .15, // outline of the sphere
+  stationTop: 38,   // how far above the sea surface a marker's line ends
+  bedTint: .05,     // how much lighter the top of the seabed is than the rest (the sides stay black, an abyss is black from its first ring down)
+  bedOpacity: .9,   // how solid the seabed is: 1 hides everything behind it, lower lets a little shine through
+  drift: [10, 0],   // px per second the seabed slides through the field (x, z)
+  subLength: 18,    // the submarine: length in px …
+  subSpeed: 8,      // … speed through the field in px per second, against the drift of the seabed …
+  subDepth: 170,    // … depth below the sea surface …
+  subLane: 70,      // … and how far off the middle of the field its course starts
+  facet: 30,        // size of the low-poly facets of the seabed (smaller = finer)
+  facetJitter: .6,  // how irregular the facets are (0 = regular grid)
+  crag: .5,         // random height variation per vertex → jagged summits and gullies
+  sharpness: 1.5,   // > 1 flattens the foothills and makes the summits pointier
+  seed: 7,
+};
+
+const COL = { line: '232,236,238', white: '255,255,255', accent: '54,121,255', alert: '255,56,56', blue: '56,132,255' };   // accent = #3679FF
+const rgba = (c, a) => `rgba(${c},${a})`;
+const S = CFG.size, H2 = S / 2;
+const CORN = [[-H2, -H2], [H2, -H2], [H2, H2], [-H2, H2]];
+const FONT = '10px ui-monospace,"SF Mono",Menlo,Consolas,monospace';
+
+const canvas = document.getElementById('scene');
+const ctx = canvas.getContext('2d');
+const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+/* ───────────── State ───────────── */
+const HOME = { yaw: -Math.PI / 4, pitch: 14 * Math.PI / 180 };   // start view: turned 45°, camera 14° above the horizon
+const IDLE_DELAY = 2;                 // seconds without input before the view turns back to HOME
+const HOME_TIME = 10;                 // seconds the turn back takes
+let homing = null;                    // the turn back in progress: { t0, yaw, pitch, dYaw }
+let yaw = HOME.yaw, pitch = HOME.pitch, userZoom = 1, auto = false, drift = !reduced, lastInput = -Infinity;
+let panX = 0, panZ = 0, bedDirty = true;   // offset of the seabed inside the fixed field (panning + drift)
+let waveX = 0, waveZ = 0;                  // offset of the waves (panning only)
+let W = 0, H = 0, dpr = 1, fit = 1, midX = 0, midY = 0;
+// heights: the waves sit on the sea surface (level 0), the seabed frame at the bottom of the sea
+const yWave = 0, ySeaTop = 0, ySeaBot = -CFG.seaDepth;
+const yc = ySeaBot / 2;
+
+/* ───────────── Projection (orbit camera, mild perspective) ───────────── */
+const F = 1800;
+let cyaw = 1, syaw = 0, cpit = 1, spit = 0, zoom = 1, ox = 0, oy = 0;
+let PX = 0, PY = 0, PS = 1;           // projected point and the scale there (screen px per world px)
+function P(x, y, z) {
+  const x1 = x * cyaw - z * syaw, z1 = x * syaw + z * cyaw, yy = y - yc;
+  const s = PS = F / (F + z1 * cpit - yy * spit) * zoom;
+  PX = ox + x1 * s;
+  PY = oy - (yy * cpit + z1 * spit) * s;
+}
+function seg(x1, y1, z1, x2, y2, z2) {
+  P(x1, y1, z1); ctx.moveTo(PX, PY);
+  P(x2, y2, z2); ctx.lineTo(PX, PY);
+}
+function strokeXZ(arr, y) {           // arr = [x1,z1,x2,z2, …] at height y
+  ctx.beginPath();
+  for (let i = 0; i < arr.length; i += 4) seg(arr[i], y, arr[i + 1], arr[i + 2], y, arr[i + 3]);
+  ctx.stroke();
+}
+function rectPath(y) {
+  ctx.beginPath();
+  P(-H2, y, -H2); ctx.moveTo(PX, PY);
+  P(H2, y, -H2); ctx.lineTo(PX, PY);
+  P(H2, y, H2); ctx.lineTo(PX, PY);
+  P(-H2, y, H2); ctx.lineTo(PX, PY);
+  ctx.closePath();
+}
+
+/* ───────────── Noise ───────────── */
+const lerp = (a, b, t) => a + (b - a) * t;
+const sstep = (a, b, x) => { const t = Math.min(1, Math.max(0, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
+function hash(i, j) {
+  let n = (Math.imul(i, 374761393) + Math.imul(j, 668265263) + Math.imul(CFG.seed, 974711)) | 0;
+  n = Math.imul(n ^ (n >>> 13), 1274126177);
+  return ((n ^ (n >>> 16)) >>> 0) / 4294967296;
+}
+function vnoise(x, y) {
+  const i = Math.floor(x), j = Math.floor(y), fx = x - i, fy = y - j;
+  const u = fx * fx * (3 - 2 * fx), v = fy * fy * (3 - 2 * fy);
+  return lerp(lerp(hash(i, j), hash(i + 1, j), u), lerp(hash(i, j + 1), hash(i + 1, j + 1), u), v);
+}
+function fbm(x, y) {
+  let a = .5, f = 1, s = 0;
+  for (let o = 0; o < 5; o++) { s += a * vnoise(x * f, y * f); f *= 2.03; a *= .5; }
+  return s / .96875;
+}
+const ridge = (x, y) => 1 - Math.abs(2 * vnoise(x, y) - 1);
+
+/* ───────────── Layer 3 · seabed: endless height field → contour lines ─────────────
+   The terrain lives in world space; the field is a window onto it at (panX, panZ). */
+const cellCache = new Map();
+function cellOf(ci, cj) {             // one massif plus a few boulders per world cell of `size` px
+  const key = ci + ',' + cj;
+  let c = cellCache.get(key);
+  if (c) return c;
+  if (ci === 0 && cj === 0) {         // hand-placed home cell
+    c = {
+      massif: [-.02, .01, 1.1, 1.3, 1],                                      // x, z, stretch x, stretch z, radius
+      peaks: [[.15, .03, .12, .75], [-.14, -.13, .11, .45], [-.06, .19, .08, .3]],   // x, z, radius, height
+      rocks: [[-.36, .33, .07, .42], [-.2, .4, .05, .3], [.37, -.36, .06, .36], [.33, .36, .045, .25]],
+      abyss: [[-.33, -.32, .12, .065, Math.cos(.6), Math.sin(.6), 30]],   // x, z, half-length, half-width, cos, sin, depth
+    };
+  } else {
+    const rnd = k => hash(ci * 7919 + k * 101, cj * 4729 + k * 37);
+    const x = ci + (rnd(1) - .5) * .5, z = cj + (rnd(2) - .5) * .5;
+    const massif = rnd(3) < .2 ? null : [x, z, 1 + .5 * rnd(4), 1 + .5 * rnd(5), .7 + .4 * rnd(6)];
+    const peaks = [], rocks = [];
+    if (massif) for (let k = 0, n = 1 + Math.floor(rnd(7) * 3); k < n; k++)
+      peaks.push([x + (rnd(10 + k) - .5) * .36, z + (rnd(20 + k) - .5) * .36, .08 + .05 * rnd(30 + k), .3 + .45 * rnd(40 + k)]);
+    for (let k = 0, n = 2 + Math.floor(rnd(8) * 3); k < n; k++)
+      rocks.push([ci + (rnd(50 + k) - .5) * .9, cj + (rnd(60 + k) - .5) * .9, .04 + .03 * rnd(70 + k), .25 + .17 * rnd(80 + k)]);
+    const abyss = [];
+    for (let k = 0, n = Math.floor(rnd(9) * 3); k < n; k++) {
+      const len = .08 + .06 * rnd(100 + k), ang = rnd(110 + k) * Math.PI;
+      abyss.push([ci + (rnd(90 + k) - .5) * .9, cj + (rnd(95 + k) - .5) * .9, len, len * (.45 + .3 * rnd(120 + k)),
+        Math.cos(ang), Math.sin(ang), lerp(CFG.abyssDepth[0], CFG.abyssDepth[1], rnd(130 + k))]);
+    }
+    c = { massif, peaks, rocks, abyss };
+  }
+  cellCache.set(key, c);
+  return c;
+}
+
+let nbCi = NaN, nbCj = NaN;
+const nb = [];                        // the 3 × 3 cells around the last sample
+function rawHeight(wx, wz) {
+  const u = wx / S, v = wz / S, ci = Math.round(u), cj = Math.round(v);
+  if (ci !== nbCi || cj !== nbCj) {
+    nbCi = ci; nbCj = cj; nb.length = 0;
+    for (let dj = -1; dj <= 1; dj++) for (let di = -1; di <= 1; di++) nb.push(cellOf(ci + di, cj + dj));
+  }
+  let h = 0, warp = -1, body = 0;
+  for (const c of nb) {
+    const m = c.massif;
+    if (m) {
+      let d = Math.hypot((u - m[0]) * m[2], (v - m[1]) * m[3]) / m[4];
+      if (d < .6) {
+        if (warp < 0) {
+          warp = fbm(u * 3.1 + 7.3, v * 3.1 + 2.1);
+          body = .22 + .3 * fbm(u * 5 + 11.7, v * 5 + 5.2) + .22 * ridge(u * 7 + 3.3, v * 7 + 9.1);
+        }
+        d += (warp - .5) * .28;
+        if (d < .44) {
+          let g = body;
+          for (const p of c.peaks) g += p[3] * Math.exp(-((u - p[0]) ** 2 + (v - p[1]) ** 2) / (p[2] * p[2]));
+          h = Math.max(h, g * (1 - sstep(.2, .44, d)));
+        }
+      }
+    }
+    for (const r of c.rocks) {        // loose boulders
+      const q = 1 - Math.hypot(u - r[0], v - r[1]) / r[2];
+      if (q > 0) h = Math.max(h, r[3] * Math.pow(q, .7) * (.75 + .5 * vnoise(u * 24 + r[0] * 9, v * 24)));
+    }
+  }
+  return h;
+}
+
+let AW = 0, AD = 0;                   // abyssAt result: how deep inside an abyss (0‥1) and its depth
+function abyssAt(wx, wz) {            // uses the cells loaded by the last rawHeight call
+  const u = wx / S, v = wz / S;
+  AW = 0;
+  for (const c of nb) for (const a of c.abyss) {
+    const dx = u - a[0], dz = v - a[1];
+    const d = Math.hypot((dx * a[4] + dz * a[5]) / a[2], (dz * a[4] - dx * a[5]) / a[3]);
+    if (d >= 1) continue;
+    const w = 1 - sstep(.45, 1, d);   // steep walls, flat bottom
+    if (w > AW) { AW = w; AD = a[6]; }
+  }
+}
+
+/* Low-poly sampling: the smooth field is read at a coarse, jittered, world-aligned vertex grid and
+   treated as flat triangles, so every contour becomes a chain of straight, angular segments. */
+const G = CFG.facet, VN = Math.ceil(S / G) + 4;
+const vx = new Float32Array(VN * VN), vz = new Float32Array(VN * VN), vh = new Float32Array(VN * VN);
+const H_CLAMP = CFG.reliefMax * 1.25;
+
+const jitterX = (I, J) => (I + (hash(I, J * 3 + 1) - .5) * CFG.facetJitter) * G;
+const jitterZ = (I, J) => (J + (hash(I * 3 + 2, J) - .5) * CFG.facetJitter) * G;
+const cragged = (I, J) => rawHeight(jitterX(I, J), jitterZ(I, J)) * (1 + (hash(I + 57, J - 91) - .5) * CFG.crag);
+let gMax = 0;                         // the home summit defines reliefMax
+for (let r = Math.ceil(H2 / G), J = -r; J <= r; J++) for (let I = -r; I <= r; I++) gMax = Math.max(gMax, cragged(I, J));
+
+let vi0 = 0, vj0 = 0;                 // world index of the first sampled vertex
+function sampleVertices() {           // fills vx / vz / vh for the current pan offset
+  const i0 = vi0 = Math.floor((panX - H2) / G) - 1, j0 = vj0 = Math.floor((panZ - H2) / G) - 1;
+  for (let j = 0; j < VN; j++) for (let i = 0; i < VN; i++) {
+    const I = i0 + i, J = j0 + j, n = j * VN + i;
+    const wx = jitterX(I, J), wz = jitterZ(I, J);
+    vx[n] = wx - panX; vz[n] = wz - panZ;
+    // undulating floor that never drops below floorMin
+    const floor = CFG.floorMin + CFG.floorVar * fbm(wx / 170 + 3.7, wz / 170 + 8.1) * (1 + (hash(I - 23, J + 71) - .5) * CFG.crag);
+    // the power curve flattens the foothills and pulls the summits into sharp points
+    const rock = CFG.reliefMax * Math.pow(cragged(I, J) / gMax, CFG.sharpness);
+    let h = floor + rock * (1 - floor / CFG.reliefMax);
+    abyssAt(wx, wz);                  // carve abysses out of the floor, fading out where rock rises
+    if (AW > 0) h = lerp(h, -AD, AW * Math.max(0, 1 - rock / 20));
+    vh[n] = Math.min(H_CLAMP, h);
+  }
+}
+
+/* Contour levels, in two zones:
+   · abyss: a ring every abyssStep, from the rim ring down;
+   · everything above: floor and rock alike are drawn with many closely spaced, faint lines (every contourStep).
+     The height differences of the floor are small, so it takes that many lines to show its shape. */
+// The lowest contour above floorMin only ever shows up around an abyss (the floor itself lies higher): it is the rim ring.
+const ABYSS_RING = 3 + Math.ceil((CFG.floorMin - 3) / CFG.abyssStep) * CFG.abyssStep;
+const LEVELS = [];
+for (let L = ABYSS_RING - Math.ceil((CFG.abyssDepth[1] + ABYSS_RING) / CFG.abyssStep) * CFG.abyssStep; L <= ABYSS_RING; L += CFG.abyssStep) LEVELS.push(L);
+for (let L = ABYSS_RING + CFG.contourStep; L < H_CLAMP; L += CFG.contourStep) LEVELS.push(L);
+const bed = {
+  levels: LEVELS.map(L => {           // line style per contour level
+    // rings of an abyss: the rim ring at full strength, then half as bright with every ring further down
+    const ring = L < ABYSS_RING ? Math.round((ABYSS_RING - L) / CFG.abyssStep) : 0;
+    const alpha = L > ABYSS_RING ? CFG.contourOpacity : CFG.abyssOpacity * Math.pow(.5, ring);
+    return { h: L, color: rgba(COL.white, alpha.toFixed(3)), width: 1 };
+  }),
+  // the surface as flat polygons, each with the contour segments and rim edges that lie on it:
+  // { poly: [x,h,z, …], segs: [level, x1,z1, x2,z2, …], rims: [x1,h1,z1, x2,h2,z2, …], cx, cz, key, tint, low }
+  facets: [],
+  rim: [[], [], [], []],              // cut profile along the four sides: [x1,h1,z1, x2,h2,z2, …]
+  corner: [0, 0, 0, 0],               // terrain height at the four corners
+};
+
+let C0 = 0, C1 = 1;                   // clipT result: the visible part of a segment as t-range
+function clipT(x1, z1, x2, z2) {      // clip a segment against the field; false if nothing is left
+  C0 = 0; C1 = 1;
+  if (Math.abs(x1) <= H2 && Math.abs(z1) <= H2 && Math.abs(x2) <= H2 && Math.abs(z2) <= H2) return true;
+  const dx = x2 - x1, dz = z2 - z1;
+  for (let e = 0; e < 4; e++) {
+    const p = e === 0 ? -dx : e === 1 ? dx : e === 2 ? -dz : dz;
+    const q = e === 0 ? x1 + H2 : e === 1 ? H2 - x1 : e === 2 ? z1 + H2 : H2 - z1;
+    if (p === 0) { if (q < 0) return false; continue; }
+    const r = q / p;
+    if (p < 0) { if (r > C1) return false; if (r > C0) C0 = r; }
+    else { if (r < C0) return false; if (r < C1) C1 = r; }
+  }
+  return true;
+}
+function clipBelow(pts, T) {          // the part of a flat polygon [x,h,z, …] that lies below height T
+  const out = [], n = pts.length;
+  for (let i = 0; i < n; i += 3) {
+    const j = (i + 3) % n, h1 = pts[i + 1], h2 = pts[j + 1];
+    if (h1 <= T) out.push(pts[i], h1, pts[i + 2]);
+    if ((h1 <= T) !== (h2 <= T)) {
+      const t = (T - h1) / (h2 - h1);
+      out.push(pts[i] + t * (pts[j] - pts[i]), T, pts[i + 2] + t * (pts[j + 2] - pts[i + 2]));
+    }
+  }
+  return out;
+}
+function clipPoly(pts) {              // clip a convex polygon [x,h,z, …] to the field (Sutherland–Hodgman)
+  for (let e = 0; e < 4 && pts.length; e++) {
+    const out = [], n = pts.length, lim = e & 1 ? H2 : -H2;
+    for (let i = 0; i < n; i += 3) {
+      const j = (i + 3) % n;
+      const x1 = pts[i], h1 = pts[i + 1], z1 = pts[i + 2], x2 = pts[j], h2 = pts[j + 1], z2 = pts[j + 2];
+      const c1 = e < 2 ? x1 : z1, c2 = e < 2 ? x2 : z2;
+      const in1 = e & 1 ? c1 <= lim : c1 >= lim, in2 = e & 1 ? c2 <= lim : c2 >= lim;
+      if (in1) out.push(x1, h1, z1);
+      if (in1 !== in2) {              // crossing: add the point exactly on the boundary
+        const t = (lim - c1) / (c2 - c1);
+        out.push(e < 2 ? lim : x1 + t * (x2 - x1), h1 + t * (h2 - h1), e < 2 ? z1 + t * (z2 - z1) : lim);
+      }
+    }
+    pts = out;
+  }
+  return pts;
+}
+function meshHeight(x, z) {           // height of the faceted surface at a point of the field
+  const ic = Math.floor((x + panX) / G) - vi0, jc = Math.floor((z + panZ) / G) - vj0;
+  for (let j = Math.max(0, jc - 1); j <= Math.min(VN - 2, jc + 1); j++) for (let i = Math.max(0, ic - 1); i <= Math.min(VN - 2, ic + 1); i++) {
+    const a = j * VN + i, b = a + 1, c = b + VN, d = a + VN;
+    const flat = Math.abs(vh[a] - vh[c]) <= Math.abs(vh[b] - vh[d]);
+    for (let tri = 0; tri < 2; tri++) {
+      const p = flat ? a : b, q = flat ? (tri ? c : b) : (tri ? d : c), r = flat ? (tri ? d : c) : (tri ? a : d);
+      const det = (vz[q] - vz[r]) * (vx[p] - vx[r]) + (vx[r] - vx[q]) * (vz[p] - vz[r]);
+      const u = ((vz[q] - vz[r]) * (x - vx[r]) + (vx[r] - vx[q]) * (z - vz[r])) / det;
+      const v = ((vz[r] - vz[p]) * (x - vx[r]) + (vx[p] - vx[r]) * (z - vz[r])) / det;
+      if (u >= -1e-6 && v >= -1e-6 && u + v <= 1 + 1e-6) return u * vh[p] + v * vh[q] + (1 - u - v) * vh[r];
+    }
+  }
+  return CFG.floorMin;
+}
+
+function facet(a, b, c) {             // one flat triangle → clipped polygon, its contour segments and rim edges
+  const ax = vx[a], az = vz[a], bx = vx[b], bz = vz[b], cx = vx[c], cz = vz[c];
+  const ha = vh[a], hb = vh[b], hc = vh[c];
+  if (Math.max(ax, bx, cx) <= -H2 || Math.min(ax, bx, cx) >= H2 || Math.max(az, bz, cz) <= -H2 || Math.min(az, bz, cz) >= H2) return;
+  const inside = Math.max(Math.abs(ax), Math.abs(az), Math.abs(bx), Math.abs(bz), Math.abs(cx), Math.abs(cz)) <= H2;
+  const poly = inside ? [ax, ha, az, bx, hb, bz, cx, hc, cz] : clipPoly([ax, ha, az, bx, hb, bz, cx, hc, cz]);
+  const n = poly.length;
+  if (n < 9) return;
+  const f = { poly, segs: [], rims: [], cx: 0, cz: 0, key: 0, tint: CFG.bedTint, low: null };
+  let lo = Infinity, hi = -Infinity;
+  for (let i = 0; i < n; i += 3) {
+    f.cx += poly[i] * 3 / n; f.cz += poly[i + 2] * 3 / n;
+    lo = Math.min(lo, poly[i + 1]); hi = Math.max(hi, poly[i + 1]);
+  }
+  // an abyss is black from its rim ring down: facets below it get no tint, facets crossing it are blacked out below the ring
+  if (hi <= ABYSS_RING) f.tint = 0;
+  else if (lo < ABYSS_RING) { f.low = clipBelow(poly, ABYSS_RING); if (f.low.length < 9) f.low = null; }
+
+  if (!inside) for (let i = 0; i < n; i += 3) {   // polygon edges lying on a side of the field form the cut profile
+    const j = (i + 3) % n, x1 = poly[i], z1 = poly[i + 2], x2 = poly[j], z2 = poly[j + 2];
+    const side = z1 === -H2 && z2 === -H2 ? 0 : x1 === H2 && x2 === H2 ? 1 : z1 === H2 && z2 === H2 ? 2 : x1 === -H2 && x2 === -H2 ? 3 : -1;
+    if (side < 0) continue;
+    f.rims.push(x1, poly[i + 1], z1, x2, poly[j + 1], z2);
+    bed.rim[side].push(x1, poly[i + 1], z1, x2, poly[j + 1], z2);
+  }
+
+  const hMin = Math.min(ha, hb, hc), hMax = Math.max(ha, hb, hc);
+  for (let k = 0; k < LEVELS.length; k++) {
+    const L = LEVELS[k];
+    if (L < hMin) continue;
+    if (L >= hMax) break;
+    let m = 0, x1 = 0, z1 = 0, x2 = 0, z2 = 0;
+    if ((ha > L) !== (hb > L)) { const t = (L - ha) / (hb - ha); x1 = ax + t * (bx - ax); z1 = az + t * (bz - az); m++; }
+    if ((hb > L) !== (hc > L)) {
+      const t = (L - hb) / (hc - hb), x = bx + t * (cx - bx), z = bz + t * (cz - bz);
+      if (m++) { x2 = x; z2 = z; } else { x1 = x; z1 = z; }
+    }
+    if ((hc > L) !== (ha > L)) { const t = (L - hc) / (ha - hc); x2 = cx + t * (ax - cx); z2 = cz + t * (az - cz); m++; }
+    if (m !== 2 || !clipT(x1, z1, x2, z2)) continue;
+    const dx = x2 - x1, dz = z2 - z1;
+    f.segs.push(k, x1 + C0 * dx, z1 + C0 * dz, x1 + C1 * dx, z1 + C1 * dz);
+  }
+  bed.facets.push(f);
+}
+
+function buildBed() {                 // re-run whenever the pan offset changes
+  sampleVertices();
+
+  bed.facets.length = 0;
+  for (const r of bed.rim) r.length = 0;
+  for (let j = 0; j < VN - 1; j++) for (let i = 0; i < VN - 1; i++) {
+    const a = j * VN + i, b = a + 1, c = b + VN, d = a + VN;
+    // split each quad along the flatter diagonal so ridges and gullies stay continuous
+    if (Math.abs(vh[a] - vh[c]) <= Math.abs(vh[b] - vh[d])) { facet(a, b, c); facet(a, c, d); }
+    else { facet(b, c, d); facet(b, d, a); }
+  }
+  CORN.forEach(([x, z], i) => { bed.corner[i] = meshHeight(x, z); });
+}
+
+// distant floor grid around the field, in three brightness rings: a plus on every crossing,
+// and between two pluses a line that keeps a small gap to both
+const floorRings = [[], [], []], floorPlus = [[], [], []];
+{
+  const st = 80, ext = 720, arm = CFG.gridPlus, inset = arm + CFG.gridGap;
+  const ringOf = d => (d < 400 ? 0 : d < 560 ? 1 : 2);
+  for (let a = -ext; a <= ext; a += st) for (let b = -ext; b < ext; b += st) {
+    const d = Math.max(Math.abs(a), Math.abs(b + st / 2));
+    if (d < H2) continue;
+    floorRings[ringOf(d)].push(a, b + inset, a, b + st - inset, b + inset, a, b + st - inset, a);
+  }
+  for (let x = -ext; x <= ext; x += st) for (let z = -ext; z <= ext; z += st) {
+    const d = Math.max(Math.abs(x), Math.abs(z));
+    if (d < H2) continue;
+    floorPlus[ringOf(d)].push(x - arm, z, x + arm, z, x, z - arm, x, z + arm);
+  }
+}
+
+/* ───────────── Layer 1 · waves ─────────────
+   A real sea in line form: a handful of Gerstner waves of different length, direction and speed added together.
+   In a Gerstner wave the water also moves back and forth, which makes the crests sharp and the troughs wide.
+   The lines run along x; crests in front hide the lines behind them. That hiding happens on a canvas of its own,
+   so the water surface stays transparent to everything underneath it. */
+const WCOLS = 60, WROWS = CFG.waveLines, WN = WROWS * (WCOLS + 1);
+const wsx = new Float32Array(WN), wsy = new Float32Array(WN), wlv = new Float32Array(WN);   // screen position and height per grid point
+const WAVE_G = 58;                    // "gravity" in px/s²: sets how fast a wave of a given length travels
+const WAVE_STEEP = .7;                // 0 = plain sine waves, 1 = crests on the verge of breaking
+const WAVES = (() => {
+  const wind = .35;                   // main direction the sea runs in (radians, in the horizontal plane)
+  const spec = [                      // wavelength in px, relative height, direction relative to the wind
+    [230, 1, 0], [150, .62, .32], [96, .4, -.45], [64, .26, .6], [45, .17, -.25], [33, .11, .85], [24, .07, -.7],
+  ];
+  const total = spec.reduce((sum, w) => sum + w[1], 0);
+  return spec.map(([len, rel, dir], i) => {
+    const k = 2 * Math.PI / len;
+    return {
+      k, w: Math.sqrt(WAVE_G * k),                              // long waves travel faster than short ones
+      dx: Math.cos(wind + dir), dz: Math.sin(wind + dir),
+      a: CFG.waveAmp * 1.6 * rel / total,                       // height
+      q: WAVE_STEEP / (k * spec.length),                        // sideways motion; chosen so crests never fold over
+      ph: hash(i, 77) * 6.2832,
+    };
+  });
+})();
+const WAVE_RMS = Math.sqrt(WAVES.reduce((sum, w) => sum + w.a * w.a / 2, 0));
+const WAVE_STYLE = [[.18, 1], [.35, 1], [.6, 1], [.95, 1.2]];   // [alpha, width] from trough to crest
+const waveBin = y => (y < -.3 * WAVE_RMS ? 0 : y < .5 * WAVE_RMS ? 1 : y < 1.3 * WAVE_RMS ? 2 : 3);
+const waveCanvas = document.createElement('canvas'), wctx = waveCanvas.getContext('2d');
+
+function drawWaves(t) {
+  const dxg = S / WCOLS, dzg = S / (WROWS - 1), C1 = WCOLS + 1;
+  for (let r = 0; r < WROWS; r++) for (let c = 0; c <= WCOLS; c++) {
+    const x0 = -H2 + c * dxg, z0 = -H2 + r * dzg, X = x0 + waveX, Z = z0 + waveZ;
+    let mx = 0, mz = 0, y = 0;
+    for (const w of WAVES) {
+      const ph = w.k * (w.dx * X + w.dz * Z) - w.w * t + w.ph, sn = Math.sin(ph);
+      mx -= w.q * w.dx * sn; mz -= w.q * w.dz * sn; y += w.a * Math.cos(ph);
+    }
+    const hold = Math.min(1, Math.min(H2 - Math.abs(x0), H2 - Math.abs(z0)) / 24);   // no sideways motion at the rim, so the sea stays inside its frame
+    P(x0 + mx * hold, yWave + y, z0 + mz * hold);
+    const i = r * C1 + c;
+    wsx[i] = PX; wsy[i] = PY; wlv[i] = y;
+  }
+
+  const g = wctx;
+  g.setTransform(1, 0, 0, 1, 0, 0);
+  g.clearRect(0, 0, waveCanvas.width, waveCanvas.height);
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.lineJoin = g.lineCap = 'round';
+  g.fillStyle = '#fff';
+  const hide = () => {                // the current path hides the wave lines behind it
+    g.globalCompositeOperation = 'destination-out'; g.globalAlpha = CFG.waveSolid;
+    g.fill();
+    g.globalCompositeOperation = 'lighter'; g.globalAlpha = 1;
+  };
+  const pen = b => { g.strokeStyle = rgba(COL.blue, Math.min(1, WAVE_STYLE[b][0] * CFG.waveOpacity)); g.lineWidth = WAVE_STYLE[b][1]; };
+
+  // The surface is cut into strips, painted far → near. The strips run along whichever grid direction
+  // lies more across the view, so one strip never has to hide a part of itself.
+  if (Math.abs(cyaw) >= Math.abs(syaw)) {         // strips between neighbouring wave lines
+    const step = cyaw > 0 ? -1 : 1;
+    for (let r = step < 0 ? WROWS - 1 : 0; r >= 0 && r < WROWS; r += step) {
+      const a = r * C1, n = r + step;
+      if (n >= 0 && n < WROWS) {
+        const b = n * C1;
+        g.beginPath();
+        g.moveTo(wsx[a], wsy[a]);
+        for (let c = 1; c <= WCOLS; c++) g.lineTo(wsx[a + c], wsy[a + c]);
+        for (let c = WCOLS; c >= 0; c--) g.lineTo(wsx[b + c], wsy[b + c]);
+        hide();
+      }
+      for (let bin = 0; bin < 4; bin++) {
+        pen(bin);
+        g.beginPath();
+        for (let c = 0; c < WCOLS; c++) {
+          if (waveBin((wlv[a + c] + wlv[a + c + 1]) / 2) !== bin) continue;
+          g.moveTo(wsx[a + c], wsy[a + c]); g.lineTo(wsx[a + c + 1], wsy[a + c + 1]);
+        }
+        g.stroke();
+      }
+    }
+  } else {                                        // strips across the wave lines
+    const step = syaw > 0 ? -1 : 1;
+    for (let c = step < 0 ? WCOLS : 0, n = c + step; n >= 0 && n <= WCOLS; c = n, n += step) {
+      g.beginPath();
+      g.moveTo(wsx[c], wsy[c]);
+      for (let r = 1; r < WROWS; r++) g.lineTo(wsx[r * C1 + c], wsy[r * C1 + c]);
+      for (let r = WROWS - 1; r >= 0; r--) g.lineTo(wsx[r * C1 + n], wsy[r * C1 + n]);
+      hide();
+      for (let bin = 0; bin < 4; bin++) {
+        pen(bin);
+        g.beginPath();
+        for (let r = 0; r < WROWS; r++) {
+          const i = r * C1 + c, j = r * C1 + n;
+          if (waveBin((wlv[i] + wlv[j]) / 2) !== bin) continue;
+          g.moveTo(wsx[i], wsy[i]); g.lineTo(wsx[j], wsy[j]);
+        }
+        g.stroke();
+      }
+    }
+  }
+
+  ctx.setTransform(1, 0, 0, 1, 0, 0);             // lay the finished wave layer over the scene
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.drawImage(waveCanvas, 0, 0);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+
+/* ───────────── Layer 2 · sea (volume of seaDepth px) ─────────────
+   Strongest at the seabed, fading upwards to nothing at SEA_FADE of its depth; the surface frame stays.
+   Drawn in two halves so the solid seabed can sit between them: back faces first, front faces last. */
+const FRONT_DIM = .25;                // opacity factor for the sea frame's front edges
+const SLICES = 4;                     // number of dotted depth lines on the back faces
+const SEA_FADE = 2 / 3;               // fraction of the depth, measured from the bottom, at which the sea has faded out
+
+function frontCorner() {              // index of the corner nearest to the camera
+  let front = 0, near = Infinity;
+  for (let i = 0; i < 4; i++) { const d = CORN[i][0] * syaw + CORN[i][1] * cyaw; if (d < near) { near = d; front = i; } }
+  return front;
+}
+function fadeUp(x, z, alpha) {        // screen-space gradient along a vertical: alpha at the seabed → 0 at the fade height
+  P(x, ySeaBot, z); const x1 = PX, y1 = PY;
+  P(x, ySeaBot + CFG.seaDepth * SEA_FADE, z);
+  const g = ctx.createLinearGradient(x1, y1, PX, PY);
+  g.addColorStop(0, rgba(COL.white, alpha)); g.addColorStop(1, rgba(COL.white, 0));
+  return g;
+}
+const SEA_BANDS = 48;                 // the wall fade is built from this many thin horizontal bands
+function seaFace(side) {              // side face: strongest at the seabed, exactly zero at the fade height
+  // A canvas gradient is flat on screen, but the wall is seen in perspective, so a single gradient never
+  // reaches zero along the whole top edge. Thin bands that each follow the wall do.
+  const [ax, az] = CORN[side], [bx, bz] = CORN[(side + 1) % 4];
+  const band = CFG.seaDepth * SEA_FADE / SEA_BANDS;
+  P(ax, ySeaBot, az); let x1 = PX, y1 = PY;
+  P(bx, ySeaBot, bz); let x2 = PX, y2 = PY;
+  for (let i = 0; i < SEA_BANDS; i++) {
+    const y = ySeaBot + (i + 1) * band;
+    P(ax, y, az); const x4 = PX, y4 = PY;
+    P(bx, y, bz); const x3 = PX, y3 = PY;
+    ctx.fillStyle = rgba(COL.blue, (CFG.seaTint * (1 - (i + .5) / SEA_BANDS)).toFixed(4));
+    ctx.beginPath();
+    ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.lineTo(x3, y3); ctx.lineTo(x4, y4);
+    ctx.fill();
+    x1 = x4; y1 = y4; x2 = x3; y2 = y3;
+  }
+}
+function seaEdge(corner, alpha) {     // vertical edge, fading upwards
+  const [x, z] = CORN[corner];
+  ctx.strokeStyle = fadeUp(x, z, alpha);
+  ctx.beginPath(); seg(x, ySeaBot, z, x, ySeaBot + CFG.seaDepth * SEA_FADE, z); ctx.stroke();
+}
+
+function drawSeaBack(front) {         // everything of the sea that lies behind the seabed
+  seaFace((front + 1) % 4); seaFace((front + 2) % 4);
+  ctx.lineWidth = 1;
+  seaEdge((front + 2) % 4, .34);
+
+  ctx.setLineDash([2, 6]);            // depth slices on the two back faces, each one fainter than the one below
+  for (let n = 1; n <= SLICES; n++) {
+    const f = n / (SLICES + 1), y = ySeaBot + f * CFG.seaDepth * SEA_FADE;
+    ctx.strokeStyle = rgba(COL.line, .2 * (1 - f));
+    ctx.beginPath();
+    for (let e = 1; e <= 2; e++) {
+      const [ax, az] = CORN[(front + e) % 4], [bx, bz] = CORN[(front + e + 1) % 4];
+      seg(ax, y, az, bx, y, bz);
+    }
+    ctx.stroke();
+  }
+  ctx.setLineDash([]);
+}
+
+function drawSeaFront(front) {        // front edges, drawn over the seabed; the two front walls stay clear so you can look inside
+  ctx.lineWidth = 1;
+  seaEdge(front, .34 * FRONT_DIM); seaEdge((front + 1) % 4, .34); seaEdge((front + 3) % 4, .34);
+}
+
+function drawSeaTop() {               // the surface frame, all four edges equally faint
+  ctx.fillStyle = rgba(COL.white, .022); rectPath(ySeaTop); ctx.fill();
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = rgba(COL.line, .45 * FRONT_DIM); rectPath(ySeaTop); ctx.stroke();
+}
+
+/* ───────────── Layer 3 · draw the seabed ─────────────
+   The seabed is a solid: its facets are painted far → near, and each one first punches its own shape out of
+   everything drawn so far, so no line shows through the terrain in front of it. */
+function drawFloor() {                // distant floor grid, behind everything else
+  ctx.lineWidth = 1;
+  [.05, .033, .016].forEach((a, i) => {
+    ctx.strokeStyle = rgba(COL.line, a); strokeXZ(floorRings[i], ySeaBot);
+    ctx.strokeStyle = rgba(COL.line, a * 2.5); strokeXZ(floorPlus[i], ySeaBot);   // the pluses a little brighter than the lines
+  });
+}
+
+const SX = new Float32Array(12), SY = new Float32Array(12);   // projected polygon (a clipped triangle has at most 8 corners)
+function grownPath(n) {               // the polygon SX/SY as a path, grown a little so neighbours leave no seam
+  let mx = 0, my = 0;
+  for (let i = 0; i < n; i++) { mx += SX[i]; my += SY[i]; }
+  mx /= n; my /= n;
+  ctx.beginPath();
+  for (let i = 0; i < n; i++) {
+    const dx = SX[i] - mx, dy = SY[i] - my, g = 1 + .75 / (Math.hypot(dx, dy) || 1);
+    i ? ctx.lineTo(mx + dx * g, my + dy * g) : ctx.moveTo(mx + dx * g, my + dy * g);
+  }
+}
+function tintPath(tint) {             // lighten the current path
+  if (tint > 0) { ctx.globalAlpha = tint; ctx.fill(); ctx.globalAlpha = 1; }
+}
+function erase(n, tint) {             // punch the polygon SX/SY out of everything drawn so far, then tint it
+  grownPath(n);
+  ctx.globalCompositeOperation = 'destination-out';
+  ctx.globalAlpha = CFG.bedOpacity;
+  ctx.fill();
+  ctx.globalAlpha = 1;
+  ctx.globalCompositeOperation = 'lighter';
+  tintPath(tint);
+}
+let penStyle = '', penWidth = 0;
+function pen(style, width) {          // only touch the canvas state when it actually changes
+  if (style !== penStyle) ctx.strokeStyle = penStyle = style;
+  if (width !== penWidth) ctx.lineWidth = penWidth = width;
+}
+const RIM = rgba(COL.line, .5);
+
+function drawSolid(base, front, t) {
+  const F = bed.facets;
+  for (const f of F) f.key = f.cx * syaw + f.cz * cyaw;
+  F.sort((a, b) => b.key - a.key);    // far → near
+  // a marker is drawn once the facets it stands on are done, i.e. one facet size nearer than its own position
+  const marks = visibleStations(dtNow);
+  for (const m of marks) m.key = m.x * syaw + m.z * cyaw - G - (m.ping ? pingRadius(m, t) : 0);   // a sphere waits for all the ground it covers
+  marks.sort((a, b) => b.key - a.key);
+  let nextMark = 0;
+  ctx.fillStyle = '#fff'; penStyle = ''; penWidth = 0;
+
+  for (const f of F) {
+    while (nextMark < marks.length && marks[nextMark].key > f.key) drawMark(marks[nextMark++], t, base);
+    const p = f.poly, n = p.length / 3;
+    for (let i = 0; i < n; i++) { P(p[i * 3], base + p[i * 3 + 1], p[i * 3 + 2]); SX[i] = PX; SY[i] = PY; }
+    let area = 0;
+    for (let i = 0; i < n; i++) { const j = (i + 1) % n; area += SX[i] * SY[j] - SX[j] * SY[i]; }
+    if (area >= 0) continue;          // facing away from the camera: hidden behind nearer facets anyway
+    erase(n, f.tint);
+    if (f.low) {                      // facet on the edge of an abyss: the part below the rim ring goes black again
+      const q = f.low, m = q.length / 3;
+      for (let i = 0; i < m; i++) { P(q[i * 3], base + q[i * 3 + 1], q[i * 3 + 2]); SX[i] = PX; SY[i] = PY; }
+      grownPath(m);
+      ctx.globalCompositeOperation = 'destination-out'; ctx.fill(); ctx.globalCompositeOperation = 'lighter';
+    }
+    const s = f.segs, r = f.rims;
+    for (let i = 0, open = false; i < s.length; i += 5) {      // contour segments; neighbours of the same style share one stroke
+      const lv = bed.levels[s[i]], y = base + lv.h;
+      if (!open || lv.color !== penStyle) { if (open) ctx.stroke(); pen(lv.color, lv.width); ctx.beginPath(); open = true; }
+      seg(s[i + 1], y, s[i + 2], s[i + 3], y, s[i + 4]);
+      if (i + 5 >= s.length) ctx.stroke();
+    }
+    for (let i = 0; i < r.length; i += 6) {
+      pen(RIM, 1);
+      ctx.beginPath(); seg(r[i], base + r[i + 1], r[i + 2], r[i + 3], base + r[i + 4], r[i + 5]); ctx.stroke();
+    }
+  }
+
+  while (nextMark < marks.length) drawMark(marks[nextMark++], t, base);
+
+}
+
+function drawBlockSides(base, front) {   // the two cut faces towards the camera close the block (dark, hiding the sea wall), then get their outline
+  ctx.fillStyle = '#fff'; penStyle = ''; penWidth = 0;
+  const sides = [front, (front + 3) % 4];
+  for (const side of sides) {
+    const r = bed.rim[side];
+    for (let i = 0; i < r.length; i += 6) {
+      P(r[i], base + r[i + 1], r[i + 2]); SX[0] = PX; SY[0] = PY;
+      P(r[i + 3], base + r[i + 4], r[i + 5]); SX[1] = PX; SY[1] = PY;
+      P(r[i + 3], base, r[i + 5]); SX[2] = PX; SY[2] = PY;
+      P(r[i], base, r[i + 2]); SX[3] = PX; SY[3] = PY;
+      erase(4, 0);                  // the cut faces stay dark
+    }
+  }
+  pen(RIM, 1);
+  ctx.beginPath();
+  for (const side of sides) {
+    const r = bed.rim[side], [ax, az] = CORN[side], [bx, bz] = CORN[(side + 1) % 4];
+    for (let i = 0; i < r.length; i += 6) seg(r[i], base + r[i + 1], r[i + 2], r[i + 3], base + r[i + 4], r[i + 5]);
+    seg(ax, base, az, bx, base, bz);
+  }
+  for (const c of [front, (front + 1) % 4, (front + 3) % 4]) seg(CORN[c][0], base, CORN[c][1], CORN[c][0], base + bed.corner[c], CORN[c][1]);
+  ctx.stroke();
+}
+
+/* Stations: small accent-coloured markers that stand on the seabed and travel with it, four floor-grid cells apart.
+   Each stands at exactly the height of the seabed at its spot (so higher up on a rock), carries a thin line
+   up to above the waves and sends out a soft sphere. Inside an abyss there is no marker. */
+const podAlert = new Set();           // codes of the markers whose sphere has touched the submarine and that still have it in range
+const podHeat = new Map();            // code → 0‥1: how red a marker is drawn right now
+const mixRGB = (a, b, k) => { const p = a.split(','), q = b.split(','); return p.map((v, i) => Math.round(+v + (q[i] - v) * k)).join(','); };
+const stationTops = [];               // top ends of the marker lines in this frame: { x, y, ax, ay, alpha, code }
+const labelFade = new Map();          // code → how far its label has faded in (0‥1)
+function visibleStations(dt) {
+  let seen = false;
+  const out = [], step = CFG.stationStep, off = CFG.stationOffset - H2;   // world position = off + n · step
+  for (let wx = Math.ceil((panX - H2 - off) / step) * step + off; wx <= panX + H2; wx += step)
+    for (let wz = Math.ceil((panZ - H2 - off) / step) * step + off; wz <= panZ + H2; wz += step) {
+      const x = wx - panX, z = wz - panZ, h = meshHeight(x, z);
+      if (h < CFG.floorMin) continue;                          // in an abyss: no marker
+      const edge = Math.min(H2 - Math.abs(x), H2 - Math.abs(z));
+      const alpha = Math.min(1, edge / 16);                    // fades in and out at the edge
+      const nx = Math.round((wx - off) / step), nz = Math.round((wz - off) / step);
+      const phase = hash(nx + 7, nz - 3);                      // every marker keeps its own rhythm
+      const code = '#0' + (100 + Math.floor(hash(nx * 13 + 342, nz * 7 - 11) * 900));   // … and its own number, like #0344
+      // the sphere touches the boat as soon as it has grown out to it (the boat counted as half its length wide)
+      const m = { x, z, h, alpha, phase, code, key: 0, ping: false, color: COL.accent };
+      const reach = Math.hypot(x - sub.x, ySeaBot + h - sub.y, z - sub.z) - CFG.subLength / 2;
+      // … and from then on the marker stays alerted until the boat is out of range: further away than the sphere ever gets
+      const range = Math.min(CFG.pingRadius, CFG.seaDepth - h);
+      if (sub.alpha <= .3 || reach > range) podAlert.delete(code);
+      else if (pingRadius(m, tNow) >= reach) podAlert.add(code);
+      const heat = lerp(podHeat.get(code) || 0, podAlert.has(code) ? 1 : 0, Math.min(1, dt * 10));   // colour eases over, it does not snap
+      podHeat.set(code, heat);
+      if (heat > .004) m.color = mixRGB(COL.accent, COL.alert, heat);
+      if (podAlert.has(code)) seen = true;
+      out.push(m, { ...m, ping: true });
+    }
+  sub.seen = seen;                    // detected: at least one marker in view has the boat in range
+  return out;
+}
+
+const pingPhase = (m, t) => (t / CFG.pingTime + m.phase) % 1;
+const pingRadius = (m, t) => Math.min(CFG.pingRadius * pingPhase(m, t), CFG.seaDepth - m.h);   // never through the sea surface
+const boxHull = [];                   // screen outline of the whole sea column, as [x, y] corners; spheres are clipped to it
+function updateBoxHull() {
+  const pts = [];
+  for (const [x, z] of CORN) for (const y of [yWave, ySeaBot]) { P(x, y, z); pts.push([PX, PY]); }
+  pts.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  const turn = (o, a, b) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+  const half = list => { const h = []; for (const q of list) { while (h.length > 1 && turn(h[h.length - 2], h[h.length - 1], q) <= 0) h.pop(); h.push(q); } h.pop(); return h; };
+  boxHull.length = 0;
+  boxHull.push(...half(pts), ...half(pts.slice().reverse()));
+}
+
+/* The pulse of a marker: a sphere growing out of it. Only the part above the seabed exists, so it shows as a dome:
+   a ring where it meets the bed (following the relief) and the round outline above it. It stays inside the sea column. */
+function drawPing(m, t, base) {
+  const p = pingPhase(m, t), r = pingRadius(m, t);
+  const fade = (1 - p * p) * m.alpha;                        // fades as it reaches full size
+  const ring = [];                    // where the sphere meets the seabed; angle 0 = right on screen, π‥2π = the half facing the camera
+  for (let i = 0; i <= 32; i++) {
+    const b = i * Math.PI / 16, c = Math.cos(b) * r, d = Math.sin(b) * r;
+    const x = Math.max(-H2, Math.min(H2, m.x + c * cyaw + d * syaw)), z = Math.max(-H2, Math.min(H2, m.z - c * syaw + d * cyaw));
+    P(x, base + meshHeight(x, z), z);
+    ring.push(PX, PY);
+  }
+  P(m.x, base + m.h, m.z);
+  const cx = PX, cy = PY, R = r * PS;
+
+  ctx.save();
+  ctx.beginPath();
+  boxHull.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
+  ctx.clip();
+  ctx.fillStyle = rgba(m.color, (CFG.pingOpacity * fade).toFixed(3));
+  ctx.strokeStyle = rgba(m.color, (CFG.pingOutline * fade).toFixed(3)); ctx.lineWidth = 1;
+
+  ctx.beginPath();                    // the dome: over the top from left to right, then back along the near half of the ring
+  ctx.moveTo(ring[32], ring[33]);
+  ctx.arc(cx, cy, R, Math.PI, 2 * Math.PI);
+  for (let i = 32; i >= 16; i--) ctx.lineTo(ring[i * 2], ring[i * 2 + 1]);
+  ctx.closePath(); ctx.fill(); ctx.stroke();
+
+  ctx.beginPath();                    // the far half of the ring, seen through the dome
+  for (let i = 0; i <= 16; i++) i ? ctx.lineTo(ring[i * 2], ring[i * 2 + 1]) : ctx.moveTo(ring[0], ring[1]);
+  ctx.stroke();
+  ctx.restore();
+  ctx.fillStyle = '#fff'; penStyle = ''; penWidth = 0;         // hand the canvas state back to drawSolid
+}
+const drawMark = (m, t, base) => (m.ping ? drawPing : drawStation)(m, t, base);
+
+function drawStation(m, t, base) {
+  const y = base + m.h;
+  P(m.x, yWave + CFG.stationTop, m.z); const tx = PX, ty = PY;
+  P(m.x, y, m.z);
+  const mx = PX, my = PY, w = 5.5 * PS, hgt = 13.5 * PS;     // the marker itself is drawn upright on screen
+
+  // thin straight line up to above the waves
+  ctx.strokeStyle = rgba(COL.accent, .15 * m.alpha); ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(mx, my - hgt); ctx.lineTo(tx, ty); ctx.stroke();
+  stationTops.push({ x: tx, y: ty, ax: mx, ay: my - hgt, alpha: m.alpha, code: m.code });
+
+  // the marker: a small solid triangle
+  ctx.fillStyle = rgba(m.color, .95 * m.alpha);
+  ctx.beginPath(); ctx.moveTo(mx, my - hgt); ctx.lineTo(mx + w, my); ctx.lineTo(mx - w, my); ctx.closePath(); ctx.fill();
+
+  ctx.fillStyle = '#fff'; penStyle = ''; penWidth = 0;         // hand the canvas state back to drawSolid
+}
+
+/* ───────────── Submarine ─────────────
+   A small schematic boat sailing against the way the seabed slides past. It is drawn as two crossed outlines
+   (side view and top view of the hull), so it reads as a body from any angle. */
+const SUB_HULL = [-9, 0, -7.5, 1.5, -4, 2.1, 4, 2.1, 7.5, 1.4, 9, 0, 7.5, -1.4, 4, -2.1, -4, -2.1, -7.5, -1.5];   // along, across — for a length of 18
+const sub = { wx: -90, wz: CFG.subLane, x: 0, y: 0, z: 0, hx: 1, hz: 0, alpha: 1, seen: false, flag: 0, top: null };   // wx/wz: position in the water; flag: 0‥1, how far the "detected" mark has faded in
+function updateSub(t, dt) {           // where the boat is this frame (the markers need to know before it is drawn)
+  const d = CFG.drift, dl = Math.hypot(d[0], d[1]) || 1;
+  sub.hx = d[0] / dl; sub.hz = d[1] / dl;                      // heading: against the way the seabed slides past
+  sub.wx += sub.hx * CFG.subSpeed * dt; sub.wz += sub.hz * CFG.subSpeed * dt;
+  // The water moves along when you pan (waveX/waveZ), and so does the boat. Leaving the field on one side,
+  // it comes back in on the other.
+  const wrap = v => ((v + H2) % S + S) % S - H2;
+  sub.x = wrap(sub.wx - waveX); sub.z = wrap(sub.wz - waveZ);
+  sub.y = yWave - CFG.subDepth + Math.sin(t * .7) * 3;
+  sub.alpha = Math.max(0, Math.min(1, (H2 - Math.abs(sub.x)) / 24, (H2 - Math.abs(sub.z)) / 24));   // fading through the walls
+}
+function drawSub() {
+  const { x, y, z, hx, hz, alpha } = sub;
+
+  // screen directions of "one px forward / up / sideways" at the boat, then every part in those terms
+  P(x, y, z); const cx = PX, cy = PY;
+  P(x + hx, y, z + hz); const fx = PX - cx, fy = PY - cy;
+  P(x, y + 1, z); const ux = PX - cx, uy = PY - cy;
+  P(x - hz, y, z + hx); const sx = PX - cx, sy = PY - cy;
+  const k = CFG.subLength / 18;
+  const to = (along, up, side) => { PX = cx + (along * fx + up * ux + side * sx) * k; PY = cy + (along * fy + up * uy + side * sy) * k; };
+  const line = pts => {               // pts = [along, up, side, …]
+    for (let i = 0; i < pts.length; i += 3) { to(pts[i], pts[i + 1], pts[i + 2]); i ? ctx.lineTo(PX, PY) : ctx.moveTo(PX, PY); }
+  };
+
+  ctx.lineWidth = .7;                 // thin, or a boat this small turns into a blob
+  ctx.strokeStyle = rgba(COL.white, .85 * alpha);
+  ctx.beginPath();
+  for (let view = 0; view < 2; view++) {                       // hull from the side, then from above
+    for (let i = 0; i < SUB_HULL.length; i += 2) {
+      to(SUB_HULL[i], view ? 0 : SUB_HULL[i + 1], view ? SUB_HULL[i + 1] : 0);
+      i ? ctx.lineTo(PX, PY) : ctx.moveTo(PX, PY);
+    }
+    ctx.closePath();
+  }
+  line([1, 2.1, 0, 1.5, 4.4, 0, 4, 4.4, 0, 4.5, 2.1, 0]);      // sail
+  line([3, 4.4, 0, 3, 6, 0]);                                  // periscope
+  line([-7.5, -3, 0, -7.5, 3, 0]);                             // rudder
+  line([-7.5, 0, -3, -7.5, 0, 3]);                             // stern planes
+  ctx.stroke();
+
+  [.4, .24, .11].forEach((a, i) => {                           // a few dashes of wake behind the stern
+    ctx.strokeStyle = rgba(COL.white, a * alpha);
+    ctx.beginPath(); line([-12 - i * 5, 0, 0, -14.5 - i * 5, 0, 0]); ctx.stroke();
+  });
+
+  // Detected by a marker: a small red triangle, point down, hangs above the boat, with a thin red line
+  // up to above the waves like the lines of the markers.
+  sub.flag = lerp(sub.flag, sub.seen ? 1 : 0, Math.min(1, dtNow * 10));
+  sub.top = null;
+  if (sub.flag > .01) {
+    const a = sub.flag * alpha;
+    P(x, yWave + CFG.stationTop, z); const topX = PX, topY = PY;
+    sub.top = { x: topX, y: topY, alpha: a };                  // its square is drawn later, crisp, with the others
+    P(x, y + 10 * k, z);                                       // the point of the triangle, just clear of the periscope
+    const tx = PX, ty = PY, h = 3 * PS;                        // 6 × 6 px
+    ctx.strokeStyle = rgba(COL.alert, .15 * a); ctx.lineWidth = 1;   // as faint as the lines of the markers
+    ctx.beginPath(); ctx.moveTo(tx, ty - 2 * h); ctx.lineTo(topX, topY); ctx.stroke();
+    ctx.fillStyle = rgba(COL.alert, a);
+    ctx.beginPath(); ctx.moveTo(tx - h, ty - 2 * h); ctx.lineTo(tx + h, ty - 2 * h); ctx.lineTo(tx, ty); ctx.closePath(); ctx.fill();
+  }
+}
+
+function drawBed(t, front) {
+  drawSolid(ySeaBot, front, t);
+}
+
+/* ───────────── Labels (crisp, drawn after the glow) ───────────── */
+function drawLabels(dt) {
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.font = FONT; ctx.textBaseline = 'middle'; ctx.lineWidth = 1;
+  if ('letterSpacing' in ctx) ctx.letterSpacing = '1.5px';
+
+  if (sub.top) {                      // the red square on top of the submarine's line
+    ctx.fillStyle = rgba(COL.alert, sub.top.alpha);
+    ctx.fillRect(Math.round(sub.top.x) - 2, Math.round(sub.top.y) - 2, 4, 4);
+  }
+  for (const s of stationTops) {      // 4 × 4 px square on top of every marker line; its name shows when the pointer is near
+    ctx.fillStyle = rgba(COL.accent, s.alpha);
+    ctx.fillRect(Math.round(s.x) - 2, Math.round(s.y) - 2, 4, 4);
+    const ex = s.ax - s.x, ey = s.ay - s.y;
+    const u = Math.min(1, Math.max(0, ((lastX - s.x) * ex + (lastY - s.y) * ey) / (ex * ex + ey * ey || 1)));
+    const near = haveLast && Math.hypot(lastX - s.x - u * ex, lastY - s.y - u * ey) < 18;   // anywhere along the line counts
+    const v = lerp(labelFade.get(s.code) || 0, near ? 1 : 0, Math.min(1, dt * 9));
+    if (v < .01 && !near) { labelFade.delete(s.code); continue; }
+    labelFade.set(s.code, v);
+    ctx.textAlign = 'left';
+    ctx.fillStyle = rgba(COL.white, .95 * v * s.alpha); ctx.fillText('POD', s.x + 10, s.y);        // the name next to the square …
+    ctx.fillStyle = rgba(COL.accent, v * s.alpha); ctx.fillText(s.code, s.x + 10, s.y + 13);       // … its number underneath
+  }
+}
+
+/* ───────────── Glow: downscaled copies added back ───────────── */
+const blur = [0, 1, 2].map(() => { const c = document.createElement('canvas'); return { c, g: c.getContext('2d') }; });
+function bloom() {
+  let src = canvas;
+  for (const b of blur) {
+    b.g.clearRect(0, 0, b.c.width, b.c.height);
+    b.g.drawImage(src, 0, 0, b.c.width, b.c.height);
+    src = b.c;
+  }
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.globalAlpha = .25; ctx.drawImage(blur[1].c, 0, 0, canvas.width, canvas.height);
+  ctx.globalAlpha = .4; ctx.drawImage(blur[2].c, 0, 0, canvas.width, canvas.height);
+  ctx.globalAlpha = 1;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+
+/* ───────────── Loop ───────────── */
+function resize() {
+  dpr = Math.min(devicePixelRatio || 1, 2);
+  W = innerWidth; H = innerHeight;
+  canvas.width = Math.round(W * dpr); canvas.height = Math.round(H * dpr);
+  waveCanvas.width = canvas.width; waveCanvas.height = canvas.height;
+  blur.forEach((b, i) => { b.c.width = Math.max(1, canvas.width >> (i + 1)); b.c.height = Math.max(1, canvas.height >> (i + 1)); });
+  fit = Math.min(W / 920, H / (474 + CFG.seaDepth));
+
+  // where the middle of the model lands on screen in the home view, so it can be centred in the window
+  cyaw = Math.cos(HOME.yaw); syaw = Math.sin(HOME.yaw); cpit = Math.cos(HOME.pitch); spit = Math.sin(HOME.pitch);
+  zoom = fit; ox = oy = 0;
+  let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+  for (const [x, z] of CORN) for (const y of [yWave + CFG.stationTop, ySeaBot]) {
+    P(x, y, z);
+    x0 = Math.min(x0, PX); x1 = Math.max(x1, PX); y0 = Math.min(y0, PY); y1 = Math.max(y1, PY);
+  }
+  midX = (x0 + x1) / 2; midY = (y0 + y1) / 2;
+}
+addEventListener('resize', resize);
+resize();
+
+const $ = id => document.getElementById(id);
+const rYaw = $('r-yaw'), rPitch = $('r-pitch'), rZoom = $('r-zoom'), rFps = $('r-fps'), rPos = $('r-pos');
+let last = performance.now(), fps = 60, readAt = 0, tNow = 0, dtNow = 0;   // tNow/dtNow: time and step of the current frame
+
+function frame(now) {
+  requestAnimationFrame(frame);       // scheduled first, so the loop survives whatever happens below
+  if (!canvas.width || !canvas.height) return;   // window has no size yet (e.g. opened in a hidden pane)
+  const dt = Math.min(.1, (now - last) / 1000), t = now / 1000;
+  last = now;
+  fps = lerp(fps, 1 / Math.max(dt, .001), .05);
+  if (auto && !pointers.size) yaw += dt * .07;
+  if (auto || pointers.size || space || now - lastInput < IDLE_DELAY * 1000) homing = null;
+  else {                              // nothing happening: turn back home, slowly, easing in and out
+    if (!homing) {
+      let d = (HOME.yaw - yaw) % (2 * Math.PI);
+      if (d > Math.PI) d -= 2 * Math.PI; else if (d < -Math.PI) d += 2 * Math.PI;   // take the short way round
+      homing = { t0: now, yaw, pitch, dYaw: d };
+    }
+    const u = Math.min(1, (now - homing.t0) / (HOME_TIME * 1000)), e = u * u * (3 - 2 * u);
+    yaw = homing.yaw + homing.dYaw * e;
+    pitch = homing.pitch + (HOME.pitch - homing.pitch) * e;
+  }
+  if (drift) { panX += CFG.drift[0] * dt; panZ += CFG.drift[1] * dt; bedDirty = true; }   // the seabed slides through the cut-out
+
+  cyaw = Math.cos(yaw); syaw = Math.sin(yaw); cpit = Math.cos(pitch); spit = Math.sin(pitch);
+  zoom = fit * userZoom; ox = W / 2 - midX * userZoom; oy = H / 2 - midY * userZoom;   // model centred in the window
+  if (bedDirty) { buildBed(); bedDirty = false; }
+
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.globalCompositeOperation = 'lighter';   // lines add up to a glow; only the seabed is drawn as a solid
+  ctx.lineJoin = ctx.lineCap = 'round';
+
+  const front = frontCorner();
+  updateBoxHull();
+  stationTops.length = 0;
+  tNow = t; dtNow = dt;
+  updateSub(t, dt);
+  drawFloor();
+  drawSeaBack(front);
+  drawBed(t, front);
+  drawSub();
+  drawSeaFront(front);
+  drawBlockSides(ySeaBot, front);
+  drawSeaTop();
+  drawWaves(reduced ? 0 : t);
+  bloom();
+  drawLabels(dt);
+
+  if (now - readAt > 250) {
+    readAt = now;
+    const deg = ((yaw * 57.2958) % 360 + 360) % 360;
+    rYaw.textContent = deg.toFixed(0).padStart(3, '0') + '°';
+    rPitch.textContent = (pitch * 57.2958).toFixed(0) + '°';
+    rZoom.textContent = userZoom.toFixed(2);
+    rFps.textContent = fps.toFixed(0);
+    const signed = v => (Math.round(v) < 0 ? '−' : '+') + Math.abs(Math.round(v));
+    rPos.textContent = `X ${signed(panX)} · Z ${signed(panZ)}`;
+  }
+}
+
+/* ───────────── Interaction ───────────── */
+const pointers = new Map();
+let pinch = 0;
+const autoBtn = $('auto');
+const setAuto = v => { auto = v; autoBtn.setAttribute('aria-pressed', v); };
+setAuto(auto);
+const driftBtn = $('drift');
+const setDrift = v => { drift = v; driftBtn.setAttribute('aria-pressed', v); };
+setDrift(drift);
+driftBtn.addEventListener('click', () => setDrift(!drift));
+
+// hold Space and move the mouse: slide the content of the sea column inside the fixed grid
+let space = false, lastX = 0, lastY = 0, haveLast = false;
+const setSpace = v => { space = v; canvas.classList.toggle('pan', v); };
+function panBy(dx, dy) {              // screen delta → movement on the horizontal plane
+  const x1 = dx / zoom, z1 = -dy / (zoom * Math.max(.2, spit));
+  const mx = x1 * cyaw + z1 * syaw, mz = z1 * cyaw - x1 * syaw;
+  panX -= mx; panZ -= mz; waveX -= mx; waveZ -= mz;
+  bedDirty = true;
+  lastInput = performance.now();
+}
+addEventListener('pointermove', e => {
+  if (e.pointerType === 'touch') return;
+  const dx = e.clientX - lastX, dy = e.clientY - lastY, had = haveLast;
+  lastX = e.clientX; lastY = e.clientY; haveLast = true;
+  if (space && had) panBy(dx, dy);
+});
+document.documentElement.addEventListener('mouseleave', () => { haveLast = false; });
+addEventListener('blur', () => setSpace(false));
+addEventListener('keyup', e => { if (e.code === 'Space') { e.preventDefault(); setSpace(false); } });
+
+canvas.addEventListener('pointerdown', e => {
+  if (space) return;
+  canvas.setPointerCapture(e.pointerId);
+  pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  canvas.classList.add('drag');
+  setAuto(false);
+  pinch = 0;
+});
+canvas.addEventListener('pointermove', e => {
+  const p = pointers.get(e.pointerId);
+  if (!p) return;
+  const dx = e.clientX - p.x, dy = e.clientY - p.y;
+  p.x = e.clientX; p.y = e.clientY;
+  if (space) return;
+  if (pointers.size === 1) {
+    yaw += dx * .006;
+    pitch = Math.min(1.45, Math.max(.08, pitch + dy * .005));
+  } else if (pointers.size === 2) {
+    const [a, b] = [...pointers.values()], d = Math.hypot(a.x - b.x, a.y - b.y);
+    if (pinch) userZoom = Math.min(4, Math.max(.4, userZoom * d / pinch));
+    pinch = d;
+  }
+});
+const release = e => { pointers.delete(e.pointerId); pinch = 0; lastInput = performance.now(); if (!pointers.size) canvas.classList.remove('drag'); };
+canvas.addEventListener('pointerup', release);
+canvas.addEventListener('pointercancel', release);
+canvas.addEventListener('wheel', e => {
+  e.preventDefault();
+  userZoom = Math.min(4, Math.max(.4, userZoom * Math.exp(-e.deltaY * .0015)));
+  lastInput = performance.now();
+}, { passive: false });
+
+autoBtn.addEventListener('click', () => setAuto(!auto));
+addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT' || e.metaKey || e.ctrlKey || e.altKey) return;
+  if (e.code === 'Space') { e.preventDefault(); if (!space) setSpace(true); }
+  else if (e.key === '0') { panX = panZ = waveX = waveZ = 0; bedDirty = true; }
+  else if (e.key === 'r' || e.key === 'R') setAuto(!auto);
+  else if (e.key === 'd' || e.key === 'D') setDrift(!drift);
+});
+
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
