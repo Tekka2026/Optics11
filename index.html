@@ -875,7 +875,16 @@ function updateSub(t, dt) {           // where the boat is this frame (the marke
   sub.alpha = Math.max(0, Math.min(1, (H2 - Math.abs(sub.x)) / 24, (H2 - Math.abs(sub.z)) / 24));   // fading through the walls
 }
 function drawSub() {
-  const { x, y, z, hx, hz, alpha } = sub;
+  const { x, y, z, hx, hz } = sub;
+  // Until a marker has identified it, the boat is only an unidentified contact: a faint dot. Once identified
+  // (and for as long as a marker keeps it in range) its shape fades in, with the red mark above it.
+  sub.flag = lerp(sub.flag, sub.seen ? 1 : 0, Math.min(1, dtNow * 10));
+  const alpha = sub.alpha * sub.flag;
+  if (sub.flag < .99) {
+    P(x, y, z);
+    ctx.fillStyle = rgba(COL.white, .35 * sub.alpha * (1 - sub.flag));
+    ctx.beginPath(); ctx.arc(PX, PY, 1.2 * PS, 0, 6.2832); ctx.fill();
+  }
 
   // screen directions of "one px forward / up / sideways" at the boat, then every part in those terms
   P(x, y, z); const cx = PX, cy = PY;
@@ -911,10 +920,9 @@ function drawSub() {
 
   // Detected by a marker: a small red triangle, point down, hangs above the boat, with a thin red line
   // up to above the waves like the lines of the markers.
-  sub.flag = lerp(sub.flag, sub.seen ? 1 : 0, Math.min(1, dtNow * 10));
   sub.top = null;
   if (sub.flag > .01) {
-    const a = sub.flag * alpha;
+    const a = alpha;
     P(x, yWave + CFG.stationTop, z); const topX = PX, topY = PY;
     sub.top = { x: topX, y: topY, alpha: a };                  // its square is drawn later, crisp, with the others
     P(x, y + 10 * k, z);                                       // the point of the triangle, just clear of the periscope
@@ -936,9 +944,11 @@ function drawLabels(dt) {
   ctx.font = FONT; ctx.textBaseline = 'middle'; ctx.lineWidth = 1;
   if ('letterSpacing' in ctx) ctx.letterSpacing = '1.5px';
 
-  if (sub.top) {                      // the red square on top of the submarine's line
+  if (sub.top) {                      // the red square on top of the submarine's line, with its name
     ctx.fillStyle = rgba(COL.alert, sub.top.alpha);
     ctx.fillRect(Math.round(sub.top.x) - 2, Math.round(sub.top.y) - 2, 4, 4);
+    ctx.textAlign = 'left';
+    ctx.fillStyle = rgba(COL.white, .95 * sub.top.alpha); ctx.fillText('SUBMARINE', sub.top.x + 10, sub.top.y);
   }
   for (const s of stationTops) {      // 4 × 4 px square on top of every marker line; its name shows when the pointer is near
     ctx.fillStyle = rgba(COL.accent, s.alpha);
