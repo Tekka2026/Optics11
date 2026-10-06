@@ -108,10 +108,12 @@ const CFG = {
   bedTint: .05,     // how much lighter the top of the seabed is than the rest (the sides stay black, an abyss is black from its first ring down)
   bedOpacity: .9,   // how solid the seabed is: 1 hides everything behind it, lower lets a little shine through
   drift: [10, 0],   // px per second the seabed slides through the field (x, z)
-  subLength: 18,    // the submarine: length in px …
-  subSpeed: 8,      // … speed through the field in px per second, against the drift of the seabed …
-  subDepth: 170,    // … depth below the sea surface …
-  subLane: 70,      // … and how far off the middle of the field its course starts
+  contactLane: 70,  // how far off the middle of the field the contacts' course starts
+  contacts: [       // what passes through the sea column, in turn, each against the drift of the seabed:
+    { kind: 'submarine', label: 'SUBMARINE', length: 18, speed: 8, depth: 170 },   // depth below the sea surface
+    { kind: 'diver', label: 'DIVER', length: 9, speed: 4, depth: 45 },
+    { kind: 'boat', label: 'BOAT', length: 20, speed: 14, depth: 0 },               // depth 0: rides on the waves
+  ],
   facet: 30,        // size of the low-poly facets of the seabed (smaller = finer)
   facetJitter: .6,  // how irregular the facets are (0 = regular grid)
   crag: .5,         // random height variation per vertex → jagged summits and gullies
@@ -774,9 +776,10 @@ function visibleStations(dt) {
       const nx = Math.round((wx - off) / step), nz = Math.round((wz - off) / step);
       const phase = hash(nx + 7, nz - 3);                      // every marker keeps its own rhythm
       const code = '#0' + (100 + Math.floor(hash(nx * 13 + 342, nz * 7 - 11) * 900));   // … and its own number, like #0344
-      // the sphere touches the boat as soon as it has grown out to it (the boat counted as half its length wide)
+      // the sphere finds the contact as soon as it has grown out to it (the contact counted as half its length wide),
       const m = { x, z, h, alpha, phase, code, key: 0, ping: false, color: COL.accent };
-      const reach = Math.hypot(x - sub.x, ySeaBot + h - sub.y, z - sub.z) - CFG.subLength / 2;
+      // measured along the seabed, so a boat on the surface or a diver near it can be found as well
+      const reach = Math.hypot(x - sub.x, z - sub.z) - sub.def.length / 2;
       // … and from then on the marker stays alerted until the boat is out of range: further away than the sphere ever gets
       const range = Math.min(CFG.pingRadius, CFG.seaDepth - h);
       if (sub.alpha <= .3 || reach > range) podAlert.delete(code);
@@ -858,26 +861,38 @@ function drawStation(m, t, base) {
   ctx.fillStyle = '#fff'; penStyle = ''; penWidth = 0;         // hand the canvas state back to drawSolid
 }
 
-/* ───────────── Submarine ─────────────
-   A small schematic boat sailing against the way the seabed slides past. It is drawn as two crossed outlines
-   (side view and top view of the hull), so it reads as a body from any angle. */
+/* ───────────── Contacts ─────────────
+   One contact at a time moves against the way the seabed slides past: a submarine, a scuba diver or a boat on the
+   waves, in turn. Until a marker has identified it, it is only a faint dot; identified, its shape appears. Shapes are
+   drawn as crossed outlines (side view and top view), so they read as bodies from any angle. */
 const SUB_HULL = [-9, 0, -7.5, 1.5, -4, 2.1, 4, 2.1, 7.5, 1.4, 9, 0, 7.5, -1.4, 4, -2.1, -4, -2.1, -7.5, -1.5];   // along, across — for a length of 18
-const sub = { wx: -90, wz: CFG.subLane, x: 0, y: 0, z: 0, hx: 1, hz: 0, alpha: 1, seen: false, flag: 0, top: null };   // wx/wz: position in the water; flag: 0‥1, how far the "detected" mark has faded in
-function updateSub(t, dt) {           // where the boat is this frame (the markers need to know before it is drawn)
+const sub = { kind: 0, def: CFG.contacts[0], wx: -90, wz: CFG.contactLane, x: 0, y: 0, z: 0, hx: 1, hz: 0, alpha: 1, seen: false, flag: 0, top: null };
+function waveHeightAt(x, z, t) {      // height of the sea surface above level 0 at a point of the field
+  let y = 0;
+  for (const w of WAVES) y += w.a * Math.cos(w.k * (w.dx * (x + waveX) + w.dz * (z + waveZ)) - w.w * t + w.ph);
+  return y;
+}
+function updateSub(t, dt) {           // where the contact is this frame (the markers need to know before it is drawn)
   const d = CFG.drift, dl = Math.hypot(d[0], d[1]) || 1;
   sub.hx = d[0] / dl; sub.hz = d[1] / dl;                      // heading: against the way the seabed slides past
-  sub.wx += sub.hx * CFG.subSpeed * dt; sub.wz += sub.hz * CFG.subSpeed * dt;
-  // The water moves along when you pan (waveX/waveZ), and so does the boat. Leaving the field on one side,
-  // it comes back in on the other.
+  sub.wx += sub.hx * sub.def.speed * dt; sub.wz += sub.hz * sub.def.speed * dt;
+  // The water moves along when you pan (waveX/waveZ), and so does the contact. Leaving the field on one side,
+  // it comes back in on the other — as the next kind of contact.
   const wrap = v => ((v + H2) % S + S) % S - H2;
-  sub.x = wrap(sub.wx - waveX); sub.z = wrap(sub.wz - waveZ);
-  sub.y = yWave - CFG.subDepth + Math.sin(t * .7) * 3;
+  const x = wrap(sub.wx - waveX), z = wrap(sub.wz - waveZ);
+  if (Math.abs(x - sub.x) > S / 2 || Math.abs(z - sub.z) > S / 2) {
+    sub.kind = (sub.kind + 1) % CFG.contacts.length; sub.def = CFG.contacts[sub.kind];
+    sub.flag = 0; podAlert.clear();
+  }
+  sub.x = x; sub.z = z;
+  sub.y = sub.def.depth ? yWave - sub.def.depth + Math.sin(t * .7) * 3 : yWave + waveHeightAt(x, z, t) + 1;
   sub.alpha = Math.max(0, Math.min(1, (H2 - Math.abs(sub.x)) / 24, (H2 - Math.abs(sub.z)) / 24));   // fading through the walls
 }
+
 function drawSub() {
-  const { x, y, z, hx, hz } = sub;
-  // Until a marker has identified it, the boat is only an unidentified contact: a faint dot. Once identified
-  // (and for as long as a marker keeps it in range) its shape fades in, with the red mark above it.
+  const { x, y, z, hx, hz, def } = sub;
+  // Until a marker has identified it, the contact is only a faint dot. Once identified (and for as long as a
+  // marker keeps it in range) its shape fades in, with the red mark above it.
   sub.flag = lerp(sub.flag, sub.seen ? 1 : 0, Math.min(1, dtNow * 10));
   const alpha = sub.alpha * sub.flag;
   if (sub.flag < .99) {
@@ -886,46 +901,64 @@ function drawSub() {
     ctx.beginPath(); ctx.arc(PX, PY, 1.2 * PS, 0, 6.2832); ctx.fill();
   }
 
-  // screen directions of "one px forward / up / sideways" at the boat, then every part in those terms
+  // screen directions of "one px forward / up / sideways" at the contact, then every part in those terms;
+  // shapes are designed for a length of 18 and scaled to the contact's length
   P(x, y, z); const cx = PX, cy = PY;
   P(x + hx, y, z + hz); const fx = PX - cx, fy = PY - cy;
   P(x, y + 1, z); const ux = PX - cx, uy = PY - cy;
   P(x - hz, y, z + hx); const sx = PX - cx, sy = PY - cy;
-  const k = CFG.subLength / 18;
+  const k = def.length / 18;
   const to = (along, up, side) => { PX = cx + (along * fx + up * ux + side * sx) * k; PY = cy + (along * fy + up * uy + side * sy) * k; };
   const line = pts => {               // pts = [along, up, side, …]
     for (let i = 0; i < pts.length; i += 3) { to(pts[i], pts[i + 1], pts[i + 2]); i ? ctx.lineTo(PX, PY) : ctx.moveTo(PX, PY); }
   };
+  const loop = pts => { line(pts); ctx.closePath(); };
 
-  ctx.lineWidth = .7;                 // thin, or a boat this small turns into a blob
-  ctx.strokeStyle = rgba(COL.white, .85 * alpha);
-  ctx.beginPath();
-  for (let view = 0; view < 2; view++) {                       // hull from the side, then from above
-    for (let i = 0; i < SUB_HULL.length; i += 2) {
-      to(SUB_HULL[i], view ? 0 : SUB_HULL[i + 1], view ? SUB_HULL[i + 1] : 0);
-      i ? ctx.lineTo(PX, PY) : ctx.moveTo(PX, PY);
+  if (alpha > .01) {
+    ctx.lineWidth = .7;               // thin, or a body this small turns into a blob
+    ctx.strokeStyle = rgba(COL.white, .85 * alpha);
+    ctx.beginPath();
+    if (def.kind === 'submarine') {
+      for (let view = 0; view < 2; view++) {                   // hull from the side, then from above
+        for (let i = 0; i < SUB_HULL.length; i += 2) {
+          to(SUB_HULL[i], view ? 0 : SUB_HULL[i + 1], view ? SUB_HULL[i + 1] : 0);
+          i ? ctx.lineTo(PX, PY) : ctx.moveTo(PX, PY);
+        }
+        ctx.closePath();
+      }
+      line([1, 2.1, 0, 1.5, 4.4, 0, 4, 4.4, 0, 4.5, 2.1, 0]);  // sail
+      line([3, 4.4, 0, 3, 6, 0]);                              // periscope
+      line([-7.5, -3, 0, -7.5, 3, 0]);                         // rudder
+      line([-7.5, 0, -3, -7.5, 0, 3]);                         // stern planes
+    } else if (def.kind === 'diver') {                         // a swimmer, stretched out, arms forward
+      line([-5, 0, 0, 5, 0, 0]);                               // body
+      line([5, 0, 0, 9, .8, 0]); line([5, 0, 0, 9, 0, 1.2]);   // arms
+      line([-5, 0, 0, -9, 1.6, 0]); line([-5, 0, 0, -9, -1, 0]);   // legs and fins
+      line([-1, 1.6, 0, 3, 1.6, 0]);                           // tank
+      to(6.5, .4, 0); ctx.moveTo(PX + 1.6 * k * PS, PY); ctx.arc(PX, PY, 1.6 * k * PS, 0, 6.2832);   // head
+      line([7, 3, 0, 7.4, 3.6, 0]); line([7.6, 5.2, 0, 8.2, 6, 0]);   // bubbles
+    } else {                                                   // a boat: hull from the side and from above, cabin, mast
+      loop([-9, 1.5, 0, -8.5, -1.4, 0, 6.5, -1.4, 0, 9, 1.5, 0]);
+      loop([-9, 0, 2, 6, 0, 2, 9, 0, 0, 6, 0, -2, -9, 0, -2]);
+      line([-2, 1.5, 0, -2, 3.4, 0, 3, 3.4, 0, 3.6, 1.5, 0]);  // cabin
+      line([0, 3.4, 0, 0, 5.5, 0]);                            // mast
     }
-    ctx.closePath();
+    ctx.stroke();
+
+    [.4, .24, .11].forEach((a, i) => {                         // a few dashes of wake behind the stern
+      ctx.strokeStyle = rgba(COL.white, a * alpha);
+      ctx.beginPath(); line([-12 - i * 5, 0, 0, -14.5 - i * 5, 0, 0]); ctx.stroke();
+    });
   }
-  line([1, 2.1, 0, 1.5, 4.4, 0, 4, 4.4, 0, 4.5, 2.1, 0]);      // sail
-  line([3, 4.4, 0, 3, 6, 0]);                                  // periscope
-  line([-7.5, -3, 0, -7.5, 3, 0]);                             // rudder
-  line([-7.5, 0, -3, -7.5, 0, 3]);                             // stern planes
-  ctx.stroke();
 
-  [.4, .24, .11].forEach((a, i) => {                           // a few dashes of wake behind the stern
-    ctx.strokeStyle = rgba(COL.white, a * alpha);
-    ctx.beginPath(); line([-12 - i * 5, 0, 0, -14.5 - i * 5, 0, 0]); ctx.stroke();
-  });
-
-  // Detected by a marker: a small red triangle, point down, hangs above the boat, with a thin red line
+  // Identified by a marker: a small red triangle, point down, hangs above the contact, with a thin red line
   // up to above the waves like the lines of the markers.
   sub.top = null;
   if (sub.flag > .01) {
     const a = alpha;
     P(x, yWave + CFG.stationTop, z); const topX = PX, topY = PY;
-    sub.top = { x: topX, y: topY, alpha: a };                  // its square is drawn later, crisp, with the others
-    P(x, y + 10 * k, z);                                       // the point of the triangle, just clear of the periscope
+    sub.top = { x: topX, y: topY, alpha: a, label: def.label };   // its square and name are drawn later, crisp, with the others
+    P(x, y + 10 * k, z);                                       // the point of the triangle, just clear of the top of the contact
     const tx = PX, ty = PY, h = 3 * PS;                        // 6 × 6 px
     ctx.strokeStyle = rgba(COL.alert, .15 * a); ctx.lineWidth = 1;   // as faint as the lines of the markers
     ctx.beginPath(); ctx.moveTo(tx, ty - 2 * h); ctx.lineTo(topX, topY); ctx.stroke();
@@ -944,11 +977,11 @@ function drawLabels(dt) {
   ctx.font = FONT; ctx.textBaseline = 'middle'; ctx.lineWidth = 1;
   if ('letterSpacing' in ctx) ctx.letterSpacing = '1.5px';
 
-  if (sub.top) {                      // the red square on top of the submarine's line, with its name
+  if (sub.top) {                      // the red square on top of the contact's line, with its name
     ctx.fillStyle = rgba(COL.alert, sub.top.alpha);
     ctx.fillRect(Math.round(sub.top.x) - 2, Math.round(sub.top.y) - 2, 4, 4);
     ctx.textAlign = 'left';
-    ctx.fillStyle = rgba(COL.white, .95 * sub.top.alpha); ctx.fillText('SUBMARINE', sub.top.x + 10, sub.top.y);
+    ctx.fillStyle = rgba(COL.white, .95 * sub.top.alpha); ctx.fillText(sub.top.label, sub.top.x + 10, sub.top.y);
   }
   for (const s of stationTops) {      // 4 × 4 px square on top of every marker line; its name shows when the pointer is near
     ctx.fillStyle = rgba(COL.accent, s.alpha);
